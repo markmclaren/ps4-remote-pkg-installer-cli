@@ -1,22 +1,27 @@
 use anyhow::{anyhow, bail, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE, Engine};
+use axum::{
+    extract::{Path as UrlPath, Request, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs::File;
+use std::hash::{BuildHasher, Hasher};
 use std::io::Read;
 use std::net::{IpAddr, UdpSocket};
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tiny_http::{Header, Response, Server, StatusCode};
+use tower::ServiceExt;
+use tower_http::services::ServeFile;
 
 #[derive(Parser)]
 #[command(
@@ -89,58 +94,31 @@ impl ApiResponse {
     }
 }
 
-fn serve_pkg(request: tiny_http::Request, path: PathBuf) {
-    use std::io::{Seek, SeekFrom};
-    let Ok(mut file) = File::open(&path) else {
-        let _ = request.respond(Response::empty(StatusCode(404)));
-        return;
-    };
-    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let range = request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Range"))
-        .and_then(|h| h.value.as_str().strip_prefix("bytes="))
-        .and_then(|r| r.split_once('-'))
-        .and_then(|(a, b)| {
-            let start = a.parse::<u64>().ok()?;
-            let end = b.parse::<u64>().unwrap_or(total.saturating_sub(1));
-            Some((start, end.min(total.saturating_sub(1))))
-        });
-    let header = |k: &str, v: &str| Header::from_bytes(k, v).unwrap();
-    match range {
-        Some((start, end)) if start <= end && start < total => {
-            if file.seek(SeekFrom::Start(start)).is_err() {
-                let _ = request.respond(Response::empty(StatusCode(500)));
-                return;
-            }
-            let len = end - start + 1;
-            let response = Response::new(
-                StatusCode(206),
-                vec![
-                    header("Content-Type", "application/octet-stream"),
-                    header("Accept-Ranges", "bytes"),
-                    header("Content-Range", &format!("bytes {start}-{end}/{total}")),
-                ],
-                std::io::BufReader::with_capacity(1 << 20, file.take(len)),
-                Some(len as usize),
-                None,
-            );
-            let _ = request.respond(response);
-        }
-        Some(_) => {
-            let _ = request.respond(
-                Response::empty(StatusCode(416))
-                    .with_header(header("Content-Range", &format!("bytes */{total}"))),
-            );
-        }
-        None => {
-            let response = Response::from_file(file)
-                .with_header(header("Content-Type", "application/octet-stream"))
-                .with_header(header("Accept-Ranges", "bytes"));
-            let _ = request.respond(response);
-        }
+type SharedFiles = Arc<HashMap<String, PathBuf>>;
+
+// ServeFile handles Range, 206/416 and conditional requests.
+async fn serve_pkg(
+    State(files): State<SharedFiles>,
+    UrlPath(key): UrlPath<String>,
+    request: Request,
+) -> Response {
+    match files.get(&key) {
+        Some(path) => match ServeFile::new(path).oneshot(request).await {
+            Ok(response) => response.into_response(),
+            Err(never) => match never {},
+        },
+        None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+// Unguessable URL token from the OS-seeded std hasher.
+fn random_token() -> String {
+    let state = std::collections::hash_map::RandomState::new();
+    let mut a = state.build_hasher();
+    a.write_u8(1);
+    let mut b = state.build_hasher();
+    b.write_u8(2);
+    format!("{:016x}{:016x}", a.finish(), b.finish())
 }
 
 #[derive(Deserialize)]
@@ -270,51 +248,44 @@ fn install_files(
         None => route_ip(&api.base_url)?,
     };
 
-    let files_by_key: BTreeMap<String, PathBuf> = files
-        .iter()
-        .map(|path| {
-            (
-                URL_SAFE.encode(path.to_string_lossy().as_bytes()),
-                path.clone(),
-            )
-        })
-        .collect();
-    let server = Server::http(format!("0.0.0.0:{port}"))
+    let tokens: Vec<String> = files.iter().map(|_| random_token()).collect();
+    let files_by_key: SharedFiles = Arc::new(
+        tokens
+            .iter()
+            .cloned()
+            .zip(files.iter().cloned())
+            .collect(),
+    );
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port))
         .map_err(|error| anyhow!("could not bind local file server on port {port}: {error}"))?;
-    let stopped = Arc::new(AtomicBool::new(false));
-    let server_stopped = Arc::clone(&stopped);
+    listener.set_nonblocking(true)?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server_thread = thread::spawn(move || {
-        while !server_stopped.load(Ordering::Relaxed) {
-            let request = match server.recv_timeout(Duration::from_millis(250)) {
-                Ok(Some(request)) => request,
-                Ok(None) => continue,
-                Err(_) => break,
+        let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async move {
+            let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
+                return;
             };
-            let key = request
-                .url()
-                .split('?')
-                .next()
-                .unwrap_or_default()
-                .strip_prefix("/pkg/");
-            match key.and_then(|key| files_by_key.get(key)).cloned() {
-                Some(path) => {
-                    thread::spawn(move || serve_pkg(request, path));
-                }
-                None => {
-                    let _ = request.respond(Response::empty(StatusCode(404)));
-                }
+            let app = Router::new()
+                .route("/pkg/:key", get(serve_pkg))
+                .with_state(files_by_key);
+            tokio::select! {
+                _ = axum::serve(listener, app) => {}
+                _ = shutdown_rx => {}
             }
-        }
+        });
+        // Drop open keep-alive connections instead of waiting on them.
+        runtime.shutdown_background();
     });
 
-    let urls: Vec<String> = files
+    let urls: Vec<String> = tokens
         .iter()
-        .map(|path| {
-            format!(
-                "http://{ip}:{port}/pkg/{}",
-                URL_SAFE.encode(path.to_string_lossy().as_bytes())
-            )
-        })
+        .map(|token| format!("http://{ip}:{port}/pkg/{token}"))
         .collect();
     let local_files: Vec<String> = files
         .iter()
@@ -342,7 +313,7 @@ fn install_files(
         wait_for_task(api, task_id, poll_seconds.max(1))
     })();
 
-    stopped.store(true, Ordering::Relaxed);
+    let _ = shutdown_tx.send(());
     let _ = server_thread.join();
     outcome
 }

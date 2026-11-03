@@ -27,13 +27,13 @@ For local installs, the CLI serves the selected files over HTTP while the task i
 
 ## Architecture
 
-The PS4 can only install from an `http://` or `https://` URL, so for local files the CLI runs a temporary HTTP file server (`tiny_http`) that the console downloads from. The server stops when the task finishes. `install-url`, `install-manifest` and the task commands do not use it.
+The PS4 can only install from an `http://` or `https://` URL, so for local files the CLI runs a temporary HTTP file server (`axum` with `tower-http`) that the console downloads from. The server stops when the task finishes. `install-url`, `install-manifest` and the task commands do not use it.
 
 ```mermaid
 flowchart LR
     subgraph PC[Windows PC]
         CLI[Rust CLI<br/>commands + polling]
-        FS[tiny_http<br/>serves PKG files]
+        FS[axum file server<br/>serves PKG files]
         Disk[(PKG files)]
         CLI --- FS
         FS --- Disk
@@ -55,7 +55,7 @@ sequenceDiagram
     participant API as PS4 installer (:12800)
     participant BGFT as PS4 BGFT
 
-    CLI->>FS: Start serving PKG files at /pkg/<key>
+    CLI->>FS: Start serving PKG files at /pkg/&lt;token&gt;
     CLI->>API: POST /api/install (packages: http://PC:8080/pkg/...)
     API->>FS: Range requests (PKG header, param.sfo, icon)
     FS-->>API: 206 partial content
