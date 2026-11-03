@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-cli
+
+      - name: Build Windows executable
+        run: cargo build --release --manifest-path rust-cli/Cargo.toml
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
+          files: rust-cli/target/release/ps4-remote-pkg-installer-cli.exe
+          fail_on_unmatched_files: true
