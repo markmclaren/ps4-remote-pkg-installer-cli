@@ -14,7 +14,12 @@ cargo build --release
 
 ## Usage
 
-Pass the console host with `--console`:
+Pass the console host with `--console`, or set the `PS4_CONSOLE` environment variable so you don't have to repeat it. `--console` overrides the variable.
+
+```powershell
+$env:PS4_CONSOLE = "192.168.1.50"            # current PowerShell session
+setx PS4_CONSOLE 192.168.1.50                # persist for new terminals
+```
 
 ```powershell
 .\target\release\ps4-remote-pkg-installer-cli.exe --console 192.168.1.50 status

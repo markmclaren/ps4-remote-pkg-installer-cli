@@ -30,8 +30,8 @@ use tower_http::services::ServeFile;
     about = "Install and manage PS4 Remote PKG Installer tasks"
 )]
 struct Cli {
-    /// PS4 hostname or IP address
-    #[arg(long, global = true)]
+    /// PS4 hostname or IP address (or set PS4_CONSOLE)
+    #[arg(long, global = true, env = "PS4_CONSOLE")]
     console: Option<String>,
 
     #[command(subcommand)]
@@ -182,7 +182,7 @@ impl ApiClient {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let console = cli.console.as_deref().context("--console is required")?;
+    let console = cli.console.as_deref().context("--console or the PS4_CONSOLE environment variable is required")?;
     let api = ApiClient::new(console)?;
 
     match cli.command {
