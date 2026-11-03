@@ -39,7 +39,7 @@ Each install creates a task on the console. The CLI saves the task ID to `%APPDA
 
 | Command | Description |
 | --- | --- |
-| `tasks` | Lists the tracked tasks as `ID`, `status`, `transferred/length bytes`. |
+| `tasks` | Lists the tracked tasks as `ID`, `status`, `transferred/length`. Sizes are shown as KiB/MiB/GiB; add `--raw` for exact byte counts. |
 | `pause <id>` | Pauses the task. |
 | `resume <id>` | Resumes a paused task. |
 | `stop <id>` | Stops the task. |
@@ -51,7 +51,7 @@ Notes:
 
 - `tasks` lists only tasks started by this CLI, on this PC. Tasks created by other tools are not shown.
 - `install` stays running and prints progress until the task reaches `Installed` or `Stopped`. For local files the file server runs only during this time, so do not close the window or the PS4 can no longer download the PKG. If you interrupt it, start the install again.
-- Byte counts are shown as the console reports them, which can be in hex (for example `0x1F400000`).
+- Sizes are shown in KiB/MiB/GiB. Use `--raw` with `tasks` or `install` to show the exact byte counts as the console reports them, which can be in hex (for example `0x1F400000`).
 - `install-url` and `install-manifest` return as soon as the task starts. Use `tasks` to follow progress.
 
 ## Architecture

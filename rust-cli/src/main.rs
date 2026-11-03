@@ -57,13 +57,20 @@ enum Command {
         /// Seconds between task progress checks
         #[arg(long, default_value_t = 3)]
         poll_seconds: u64,
+        /// Show exact byte counts instead of KiB/MiB/GiB
+        #[arg(long)]
+        raw: bool,
     },
     /// Install a PKG from an HTTP(S) URL
     InstallUrl { url: String },
     /// Install packages listed by a manifest JSON URL
     InstallManifest { url: String },
     /// Show progress for tasks started by this CLI
-    Tasks,
+    Tasks {
+        /// Show exact byte counts instead of KiB/MiB/GiB
+        #[arg(long)]
+        raw: bool,
+    },
     /// Pause a task
     Pause { task_id: u32 },
     /// Resume a task
@@ -203,8 +210,16 @@ fn main() -> Result<()> {
             advertise_ip,
             file_server_port,
             poll_seconds,
+            raw,
         } => {
-            install_files(&api, files, advertise_ip, file_server_port, poll_seconds)?;
+            install_files(
+                &api,
+                files,
+                advertise_ip,
+                file_server_port,
+                poll_seconds,
+                !raw,
+            )?;
         }
         Command::InstallUrl { url } => {
             let response = api.post("/install", json!({ "type": "direct", "packages": [url] }))?;
@@ -214,7 +229,7 @@ fn main() -> Result<()> {
             let response = api.post("/install", json!({ "type": "ref_pkg_url", "url": url }))?;
             report_install(response)?;
         }
-        Command::Tasks => show_tasks(&api)?,
+        Command::Tasks { raw } => show_tasks(&api, !raw)?,
         Command::Pause { task_id } => modify_task(&api, task_id, "pause")?,
         Command::Resume { task_id } => modify_task(&api, task_id, "resume")?,
         Command::Stop { task_id } => modify_task(&api, task_id, "stop")?,
@@ -234,6 +249,7 @@ fn install_files(
     advertise_ip: Option<IpAddr>,
     port: u16,
     poll_seconds: u64,
+    human: bool,
 ) -> Result<()> {
     let files = files
         .into_iter()
@@ -323,7 +339,7 @@ fn install_files(
             "Started task {task_id}; serving {} file(s) from {ip}:{port}",
             files.len()
         );
-        wait_for_task(api, task_id, poll_seconds.max(1))
+        wait_for_task(api, task_id, poll_seconds.max(1), human)
     })();
 
     let _ = shutdown_tx.send(());
@@ -350,7 +366,37 @@ fn route_ip(api_base_url: &str) -> Result<IpAddr> {
     Ok(socket.local_addr()?.ip())
 }
 
-fn wait_for_task(api: &ApiClient, task_id: u32, poll_seconds: u64) -> Result<()> {
+fn parse_number(text: &str) -> Option<u64> {
+    text.strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .or_else(|| text.parse::<u64>().ok())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+// Returns "done/total" with units; falls back to the raw text if it is not numeric.
+fn format_progress(done: &str, total: &str, human: bool) -> String {
+    match (human, parse_number(done), parse_number(total)) {
+        (true, Some(d), Some(t)) => format!("{}/{}", human_bytes(d), human_bytes(t)),
+        _ => format!("{done}/{total} bytes"),
+    }
+}
+
+fn wait_for_task(api: &ApiClient, task_id: u32, poll_seconds: u64, human: bool) -> Result<()> {
     loop {
         thread::sleep(Duration::from_secs(poll_seconds));
         let value = api.post("/get_task_progress", json!({ "task_id": task_id }))?;
@@ -360,7 +406,7 @@ fn wait_for_task(api: &ApiClient, task_id: u32, poll_seconds: u64) -> Result<()>
         let status = task_status(progress.bits.as_ref());
         print!("\rTask {task_id}: {status}");
         if let (Some(done), Some(total)) = (&progress.transferred, &progress.length) {
-            print!(" ({done}/{total} bytes)");
+            print!(" ({})", format_progress(done, total, human));
         }
         use std::io::Write;
         std::io::stdout().flush().ok();
@@ -393,7 +439,7 @@ fn task_status(bits: Option<&Value>) -> &'static str {
     }
 }
 
-fn show_tasks(api: &ApiClient) -> Result<()> {
+fn show_tasks(api: &ApiClient, human: bool) -> Result<()> {
     let ids = load_task_ids()?;
     if ids.is_empty() {
         println!("No tracked tasks. Start an install to add one.");
@@ -407,8 +453,9 @@ fn show_tasks(api: &ApiClient) -> Result<()> {
         let transferred = task.transferred.unwrap_or_else(|| "?".into());
         let length = task.length.unwrap_or_else(|| "?".into());
         println!(
-            "{id}\t{}\t{transferred}/{length} bytes",
-            task_status(task.bits.as_ref())
+            "{id}\t{}\t{}",
+            task_status(task.bits.as_ref()),
+            format_progress(&transferred, &length, human)
         );
     }
     Ok(())
