@@ -24,3 +24,48 @@ Pass the console host with `--console`:
 ```
 
 For local installs, the CLI serves the selected files over HTTP while the task is running. Allow inbound connections to the configured file-server port (default `8080`) in Windows Firewall, and use `--advertise-ip` if automatic interface selection does not choose an address reachable by the PS4. Task IDs are stored under `%APPDATA%\ps4-remote-pkg-installer-cli`
+
+## Architecture
+
+The PS4 can only install from an `http://` or `https://` URL, so for local files the CLI runs a temporary HTTP file server (`tiny_http`) that the console downloads from. The server stops when the task finishes. `install-url`, `install-manifest` and the task commands do not use it.
+
+```mermaid
+flowchart LR
+    subgraph PC[Windows PC]
+        CLI[Rust CLI<br/>commands + polling]
+        FS[tiny_http<br/>serves PKG files]
+        Disk[(PKG files)]
+        CLI --- FS
+        FS --- Disk
+    end
+    subgraph PS4
+        API[Remote PKG Installer<br/>API on :12800]
+        BGFT[BGFT download + install]
+        API --> BGFT
+    end
+    CLI -- "control API (JSON)" --> API
+    API -- "reads PKG metadata" --> FS
+    BGFT -- "downloads PKG data" --> FS
+```
+
+```mermaid
+sequenceDiagram
+    participant CLI as Rust CLI
+    participant FS as File server (PC :8080)
+    participant API as PS4 installer (:12800)
+    participant BGFT as PS4 BGFT
+
+    CLI->>FS: Start serving PKG files at /pkg/<key>
+    CLI->>API: POST /api/install (packages: http://PC:8080/pkg/...)
+    API->>FS: Range requests (PKG header, param.sfo, icon)
+    FS-->>API: 206 partial content
+    API->>BGFT: Register download task
+    BGFT->>FS: Range requests for PKG data
+    FS-->>BGFT: 206 file chunks
+    API-->>CLI: task_id
+    loop until finished
+        CLI->>API: POST /api/get_task_progress
+        API-->>CLI: status, transferred, length
+    end
+    CLI->>FS: Stop file server
+```
