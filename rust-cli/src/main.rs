@@ -103,7 +103,11 @@ async fn serve_pkg(
     request: Request,
 ) -> Response {
     match files.get(&key) {
-        Some(path) => match ServeFile::new(path).oneshot(request).await {
+        Some(path) => match ServeFile::new(path)
+            .with_buf_chunk_size(1 << 20)
+            .oneshot(request)
+            .await
+        {
             Ok(response) => response.into_response(),
             Err(never) => match never {},
         },
@@ -256,8 +260,17 @@ fn install_files(
             .zip(files.iter().cloned())
             .collect(),
     );
-    let listener = std::net::TcpListener::bind(("0.0.0.0", port))
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_send_buffer_size(4 << 20)?;
+    socket
+        .bind(&std::net::SocketAddr::from(([0, 0, 0, 0], port)).into())
         .map_err(|error| anyhow!("could not bind local file server on port {port}: {error}"))?;
+    socket.listen(1024)?;
+    let listener: std::net::TcpListener = socket.into();
     listener.set_nonblocking(true)?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server_thread = thread::spawn(move || {
