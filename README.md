@@ -25,6 +25,35 @@ Pass the console host with `--console`:
 
 For local installs, the CLI serves the selected files over HTTP while the task is running. Allow inbound connections to the configured file-server port (default `8080`) in Windows Firewall, and use `--advertise-ip` if automatic interface selection does not choose an address reachable by the PS4. Task IDs are stored under `%APPDATA%\ps4-remote-pkg-installer-cli`
 
+## Tasks
+
+Each install creates a task on the console. The CLI saves the task ID to `%APPDATA%\ps4-remote-pkg-installer-cli\tasks.json`, so you can check on it later from a new terminal.
+
+```powershell
+.\ps4-remote-pkg-installer-cli.exe --console 192.168.1.50 tasks
+.\ps4-remote-pkg-installer-cli.exe --console 192.168.1.50 pause 12
+.\ps4-remote-pkg-installer-cli.exe --console 192.168.1.50 resume 12
+.\ps4-remote-pkg-installer-cli.exe --console 192.168.1.50 stop 12
+.\ps4-remote-pkg-installer-cli.exe --console 192.168.1.50 remove 12
+```
+
+| Command | Description |
+| --- | --- |
+| `tasks` | Lists the tracked tasks as `ID`, `status`, `transferred/length bytes`. |
+| `pause <id>` | Pauses the task. |
+| `resume <id>` | Resumes a paused task. |
+| `stop <id>` | Stops the task. |
+| `remove <id>` | Unregisters the task on the console and stops tracking it. |
+
+Status values are `Downloading`, `Installing`, `Installed`, `Paused`, `Stopped` and `Unknown` (an unrecognised console state).
+
+Notes:
+
+- `tasks` lists only tasks started by this CLI, on this PC. Tasks created by other tools are not shown.
+- `install` stays running and prints progress until the task reaches `Installed` or `Stopped`. For local files the file server runs only during this time, so do not close the window or the PS4 can no longer download the PKG. If you interrupt it, start the install again.
+- Byte counts are shown as the console reports them, which can be in hex (for example `0x1F400000`).
+- `install-url` and `install-manifest` return as soon as the task starts. Use `tasks` to follow progress.
+
 ## Architecture
 
 The PS4 can only install from an `http://` or `https://` URL, so for local files the CLI runs a temporary HTTP file server (`axum` with `tower-http`) that the console downloads from. The server stops when the task finishes. `install-url`, `install-manifest` and the task commands do not use it.
