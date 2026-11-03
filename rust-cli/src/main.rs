@@ -75,7 +75,72 @@ struct ApiResponse {
     error: Option<Value>,
     error_code: Option<String>,
     task_id: Option<u32>,
-    exists: Option<bool>,
+    exists: Option<Value>,
+}
+
+impl ApiResponse {
+    // The console sends "exists" as the string "true"/"false".
+    fn exists(&self) -> Option<bool> {
+        match self.exists.as_ref()? {
+            Value::Bool(b) => Some(*b),
+            Value::String(s) => Some(s == "true"),
+            _ => None,
+        }
+    }
+}
+
+fn serve_pkg(request: tiny_http::Request, path: PathBuf) {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut file) = File::open(&path) else {
+        let _ = request.respond(Response::empty(StatusCode(404)));
+        return;
+    };
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let range = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .and_then(|h| h.value.as_str().strip_prefix("bytes="))
+        .and_then(|r| r.split_once('-'))
+        .and_then(|(a, b)| {
+            let start = a.parse::<u64>().ok()?;
+            let end = b.parse::<u64>().unwrap_or(total.saturating_sub(1));
+            Some((start, end.min(total.saturating_sub(1))))
+        });
+    let header = |k: &str, v: &str| Header::from_bytes(k, v).unwrap();
+    match range {
+        Some((start, end)) if start <= end && start < total => {
+            if file.seek(SeekFrom::Start(start)).is_err() {
+                let _ = request.respond(Response::empty(StatusCode(500)));
+                return;
+            }
+            let len = end - start + 1;
+            let response = Response::new(
+                StatusCode(206),
+                vec![
+                    header("Content-Type", "application/octet-stream"),
+                    header("Accept-Ranges", "bytes"),
+                    header("Content-Range", &format!("bytes {start}-{end}/{total}")),
+                ],
+                std::io::BufReader::with_capacity(1 << 20, file.take(len)),
+                Some(len as usize),
+                None,
+            );
+            let _ = request.respond(response);
+        }
+        Some(_) => {
+            let _ = request.respond(
+                Response::empty(StatusCode(416))
+                    .with_header(header("Content-Range", &format!("bytes */{total}"))),
+            );
+        }
+        None => {
+            let response = Response::from_file(file)
+                .with_header(header("Content-Type", "application/octet-stream"))
+                .with_header(header("Accept-Ranges", "bytes"));
+            let _ = request.respond(response);
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -138,7 +203,7 @@ fn main() -> Result<()> {
             ensure_success(&response)?;
             println!(
                 "Remote PKG Installer is {}",
-                if response.exists == Some(false) {
+                if response.exists() == Some(false) {
                     "running"
                 } else {
                     "not responding"
@@ -149,7 +214,7 @@ fn main() -> Result<()> {
             let response = api.post("/is_exists", json!({ "title_id": title_id }))?;
             let response: ApiResponse = serde_json::from_value(response)?;
             ensure_success(&response)?;
-            println!("{}", response.exists.unwrap_or(false));
+            println!("{}", response.exists().unwrap_or(false));
         }
         Command::Install {
             files,
@@ -231,16 +296,14 @@ fn install_files(
                 .next()
                 .unwrap_or_default()
                 .strip_prefix("/pkg/");
-            let response = key
-                .and_then(|key| files_by_key.get(key))
-                .and_then(|path| File::open(path).ok())
-                .map(|file| {
-                    Response::from_file(file).with_header(
-                        Header::from_bytes("Content-Type", "application/octet-stream").unwrap(),
-                    ).boxed()
-                })
-                .unwrap_or_else(|| Response::empty(StatusCode(404)).boxed());
-            let _ = request.respond(response);
+            match key.and_then(|key| files_by_key.get(key)).cloned() {
+                Some(path) => {
+                    thread::spawn(move || serve_pkg(request, path));
+                }
+                None => {
+                    let _ = request.respond(Response::empty(StatusCode(404)));
+                }
+            }
         }
     });
 
