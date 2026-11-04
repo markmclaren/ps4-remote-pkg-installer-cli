@@ -26,8 +26,10 @@ jobs:
       - name: Build debug executable
         run: cargo build --manifest-path rust-cli/Cargo.toml
 
-      - name: Rename debug executable
-        run: Copy-Item rust-cli/target/debug/ps4-remote-pkg-installer-cli.exe rust-cli/target/debug/ps4-remote-pkg-installer-cli-debug.exe
+      - name: Prepare release artifacts
+        run: |
+          Copy-Item rust-cli/target/release/ps4-remote-pkg-installer.exe rust-cli/target/release/ps4-remote-pkg-installer-cli.exe
+          Copy-Item rust-cli/target/debug/ps4-remote-pkg-installer.exe rust-cli/target/debug/ps4-remote-pkg-installer-cli-debug.exe
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -35,6 +37,8 @@ jobs:
           name: Release ${{ github.ref_name }}
           generate_release_notes: true
           files: |
+            rust-cli/target/release/ps4-remote-pkg-installer.exe
             rust-cli/target/release/ps4-remote-pkg-installer-cli.exe
             rust-cli/target/debug/ps4-remote-pkg-installer-cli-debug.exe
+            install-pkgs.bat
           fail_on_unmatched_files: true
