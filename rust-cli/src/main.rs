@@ -89,8 +89,9 @@ struct ApiResponse {
     status: Option<String>,
     error: Option<Value>,
     error_code: Option<String>,
-    task_id: Option<u32>,
+    task_id: Option<i64>,
     exists: Option<Value>,
+    size: Option<Value>,
 }
 
 impl ApiResponse {
@@ -102,6 +103,60 @@ impl ApiResponse {
             _ => None,
         }
     }
+}
+
+struct PkgHeaderInfo {
+    content_id: String,
+    title_id: String,
+    content_type: u32,
+    is_patch: bool,
+}
+
+impl PkgHeaderInfo {
+    fn is_base_game(&self) -> bool {
+        // 0x1A = PKG_CONTENT_TYPE_GD (Game Data)
+        self.content_type == 0x1A && !self.is_patch
+    }
+}
+
+fn inspect_pkg_header(path: &std::path::Path) -> Option<PkgHeaderInfo> {
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 0x80];
+    file.read_exact(&mut header).ok()?;
+
+    // PS4 PKG magic: "\x7FCNT" at 0x00..0x04
+    if &header[0..4] != b"\x7FCNT" {
+        return None;
+    }
+
+    let raw_cid = &header[0x40..0x64];
+    let cid_end = raw_cid
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(raw_cid.len());
+    let content_id = std::str::from_utf8(&raw_cid[..cid_end])
+        .ok()?
+        .trim()
+        .to_string();
+    // Standard PS4 Content ID format: XXYYYY-ZZZZZZZZZ_00-AAAAAAAAAAAAAAAA
+    if content_id.len() < 19
+        || content_id.as_bytes().get(6) != Some(&b'-')
+        || content_id.as_bytes().get(16) != Some(&b'_')
+    {
+        return None;
+    }
+    let title_id = content_id[7..16].to_string();
+    let content_type = u32::from_be_bytes(header[0x74..0x78].try_into().ok()?);
+    let content_flags = u32::from_be_bytes(header[0x78..0x7C].try_into().ok()?);
+    const PATCH_FLAGS_MASK: u32 = 0x0010_0000 | 0x4000_0000 | 0x4100_0000 | 0x6000_0000;
+    let is_patch = (content_flags & PATCH_FLAGS_MASK) != 0;
+
+    Some(PkgHeaderInfo {
+        content_id,
+        title_id,
+        content_type,
+        is_patch,
+    })
 }
 
 #[derive(Clone)]
@@ -334,21 +389,50 @@ fn install_files(
         None => route_ip(&api.base_url)?,
     };
 
-    // Pre-flight check: Ensure PS4 is responsive before launching server
+    let pkg_info = files.first().and_then(|p| inspect_pkg_header(p));
+    let check_title_id = pkg_info
+        .as_ref()
+        .map(|info| info.title_id.as_str())
+        .unwrap_or("");
+
+    // Pre-flight check: Ensure PS4 is responsive and check whether base game is already installed
     println!("Checking PS4 Remote PKG Installer status...");
-    let mut console_ready = false;
+    let mut preflight_response: Option<ApiResponse> = None;
     for attempt in 1..=5 {
-        if api.post("/is_exists", json!({ "title_id": "" })).is_ok() {
-            console_ready = true;
-            break;
+        if let Ok(val) = api.post("/is_exists", json!({ "title_id": check_title_id })) {
+            if let Ok(resp) = serde_json::from_value::<ApiResponse>(val) {
+                if resp.status.as_deref() == Some("success") {
+                    preflight_response = Some(resp);
+                    break;
+                }
+            }
         }
         if attempt < 5 {
             println!("Console busy or not responding; retrying... (attempt {attempt}/5)");
             thread::sleep(Duration::from_secs(2));
         }
     }
-    if !console_ready {
+    let Some(preflight) = preflight_response else {
         bail!("PS4 Remote PKG Installer is not responding. Please make sure the app is open on your PS4.");
+    };
+
+    if let Some(info) = &pkg_info {
+        if info.is_base_game() && preflight.exists() == Some(true) {
+            let size_suffix = value_to_u64(preflight.size.as_ref())
+                .map(|bytes| {
+                    if human {
+                        format!(" ({})", human_bytes(bytes))
+                    } else {
+                        format!(" ({bytes} B)")
+                    }
+                })
+                .unwrap_or_default();
+            println!(
+                "✓ Title {} ({}) is already installed on PS4{} — skipping.",
+                info.title_id, info.content_id, size_suffix
+            );
+            return Ok(());
+        }
     }
 
     let tokens: Vec<String> = files.iter().map(|_| random_token()).collect();
@@ -442,10 +526,36 @@ fn install_files(
     let outcome = (|| -> Result<()> {
         let response = response?;
         let install: ApiResponse = serde_json::from_value(response)?;
-        ensure_success(&install)?;
-        let task_id = install
+        if install.status.as_deref() != Some("success") {
+            let err_code = install
+                .error_code
+                .as_deref()
+                .and_then(parse_number)
+                .unwrap_or(0);
+            if err_code == 0x80990088 || err_code == 0x80990015 {
+                let label = pkg_info
+                    .as_ref()
+                    .map(|i| format!("{} ({})", i.title_id, i.content_id))
+                    .unwrap_or_else(|| file_names.join(", "));
+                println!(
+                    "✓ Package {label} is already installed on PS4 (0x{err_code:08X}) — skipping."
+                );
+                return Ok(());
+            }
+            ensure_success(&install)?;
+        }
+        let raw_task_id = install
             .task_id
             .context("install response did not contain a task_id")?;
+        if raw_task_id < 0 {
+            let label = pkg_info
+                .as_ref()
+                .map(|i| format!("{} ({})", i.title_id, i.content_id))
+                .unwrap_or_else(|| file_names.join(", "));
+            println!("✓ Package {label} is already installed on PS4 — skipping.");
+            return Ok(());
+        }
+        let task_id = raw_task_id as u32;
         let mut ids = load_task_ids()?;
         ids.insert(task_id);
         save_task_ids(&ids)?;
@@ -636,7 +746,7 @@ fn wait_for_task(
             if err_code != 0 {
                 println!();
                 let msg = match err_code {
-                    0x80990088 => "Application or package is already installed on the console.",
+                    0x80990088 | 0x80990015 => "Application or package is already installed on the console.",
                     0x80990004 | 0x8099000c | 0x80990011 => "Insufficient free storage space on PS4 hard drive.",
                     0x80990014 => "Network connection lost by PS4 background transfer service.",
                     _ => "Internal BGFT installation error.",
@@ -866,8 +976,24 @@ fn modify_task(api: &ApiClient, task_id: u32, action: &str) -> Result<()> {
 
 fn report_install(value: Value) -> Result<()> {
     let response: ApiResponse = serde_json::from_value(value)?;
+    if response.status.as_deref() != Some("success") {
+        let err_code = response
+            .error_code
+            .as_deref()
+            .and_then(parse_number)
+            .unwrap_or(0);
+        if err_code == 0x80990088 || err_code == 0x80990015 {
+            println!("✓ Package is already installed on PS4 (0x{err_code:08X}) — skipping.");
+            return Ok(());
+        }
+    }
     ensure_success(&response)?;
-    if let Some(task_id) = response.task_id {
+    if let Some(raw_task_id) = response.task_id {
+        if raw_task_id < 0 {
+            println!("✓ Package is already installed on PS4 — skipping.");
+            return Ok(());
+        }
+        let task_id = raw_task_id as u32;
         let mut ids = load_task_ids()?;
         ids.insert(task_id);
         save_task_ids(&ids)?;
