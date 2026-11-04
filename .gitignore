@@ -1,1 +1,5 @@
 /rust-cli/target/
+*.pkg
+/done/
+/ip.txt
+/*.exe

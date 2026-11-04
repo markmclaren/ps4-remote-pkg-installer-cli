@@ -1,15 +1,25 @@
 # PS4 Remote PKG Installer CLI
 
-A Windows command-line client for [flatz's PS4 Remote PKG Installer](https://github.com/flatz/ps4_remote_pkg_installer).
+A **Rust command-line rewrite** of the original Java GUI ([`BenjaminFaal/ps4-remote-pkg-installer`](https://github.com/BenjaminFaal/ps4-remote-pkg-installer)) for sending `.pkg` files to a PS4 running the Remote PKG Installer.
 
-Looking for the original Java GUI? It is available in the [PS4 Remote PKG Installer repository](https://github.com/BenjaminFaal/ps4-remote-pkg-installer).
+It is designed and tested to pair with [**`markmclaren/ps4_remote_pkg_installer`**](https://github.com/markmclaren/ps4_remote_pkg_installer) — a **modified OpenOrbis build of [flatz's PS4 server (`ps4_remote_pkg_installer`)](https://github.com/flatz/ps4_remote_pkg_installer)** featuring multi-GB transfer stability fixes, thread-safe BGFT/HTTP handling, and a built-in Web Dashboard & Swagger UI on port `12800`.
+
+## What's Changed
+
+Compared to the original Java GUI and stock PS4 server, this Rust CLI rewrite and the modified PS4 server ([`markmclaren/ps4_remote_pkg_installer`](https://github.com/markmclaren/ps4_remote_pkg_installer)) include:
+
+- **Rust CLI + Embedded HTTP Server (Replacing the Java GUI):** Replaces the heavyweight Java/Swing desktop application with a single native Rust executable (`axum` + `tower-http`) and a drag-and-drop batch launcher (`install-pkgs.bat`).
+- **Active-Stream Awareness:** Tracks live HTTP Range requests from the PS4 (`SceBgft`) so temporary control-API timeouts during heavy multi-GB PS4 hard-drive allocation never prematurely shut down the local file server.
+- **High-Throughput Local File Serving:** Uses 2 MiB streaming chunks, an 8 MiB TCP socket send buffer, and `TCP_NODELAY` for fast LAN transfers, while avoiding Windows `SO_REUSEADDR` port hijacking.
+- **Smarter API Timeouts & Polling:** Uses a dedicated 60-second timeout without duplicate retries on non-idempotent `/api/install` requests, gentler 2-second default progress polling (`--poll-seconds`), and extended poll retry tolerance during disk flushes.
+- **PS4 Error Code & Lifecycle Handling:** Decodes signed 32-bit PS4/BGFT error codes (e.g. `0x80990088` already installed, insufficient storage), waits for the PS4 OS to finalize installation before unregistering completed tasks, and pairs with the Web Dashboard, thread-safety fixes, and `HEAD`/`Range` metadata probing in [`markmclaren/ps4_remote_pkg_installer`](https://github.com/markmclaren/ps4_remote_pkg_installer).
 
 ## Build
 
-Install Rust from [rustup.rs](https://rustup.rs/), then build the client from the repository root:
+Install Rust from [rustup.rs](https://rustup.rs/), then build the client from `rust-cli`:
 
 ```powershell
-cargo build --release
+cargo build --release --manifest-path rust-cli\Cargo.toml
 ```
 
 ## Usage

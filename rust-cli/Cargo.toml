@@ -3,6 +3,10 @@ name = "ps4-remote-pkg-installer-cli"
 version = "0.1.2"
 edition = "2021"
 
+[[bin]]
+name = "ps4-remote-pkg-installer"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 axum = "0.7"
