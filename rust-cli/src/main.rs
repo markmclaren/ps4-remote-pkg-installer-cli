@@ -167,6 +167,8 @@ struct TaskProgress {
     num_total: Option<Value>,
     rest_sec: Option<Value>,
     rest_sec_total: Option<Value>,
+    preparing_percent: Option<Value>,
+    local_copy_percent: Option<Value>,
 }
 
 struct ApiClient {
@@ -645,13 +647,23 @@ fn wait_for_task(
             }
         }
 
-        let raw_status = task_status(progress.bits.as_ref());
+        let mut raw_status = task_status(progress.bits.as_ref());
         let transferred = value_to_u64(progress.transferred_total.as_ref())
             .or_else(|| value_to_u64(progress.transferred.as_ref()))
             .unwrap_or(0);
         let total_length = value_to_u64(progress.length_total.as_ref())
             .or_else(|| value_to_u64(progress.length.as_ref()))
             .unwrap_or(0);
+        let local_copy_pct = value_to_u64(progress.local_copy_percent.as_ref()).unwrap_or(0);
+
+        if raw_status != "Installed"
+            && raw_status != "Stopped"
+            && total_length > 0
+            && transferred >= total_length
+            && local_copy_pct >= 100
+        {
+            raw_status = "Installed";
+        }
 
         let piece_idx = value_to_u64(progress.num_index.as_ref()).map(|v| v as usize);
         let piece_total = value_to_u64(progress.num_total.as_ref())
@@ -691,8 +703,13 @@ fn wait_for_task(
         };
 
         // Determine user-friendly status
-        let status = if raw_status == "Downloading" && total_length > 0 && transferred >= total_length {
+        let status = if (raw_status == "Downloading" || raw_status == "Unknown")
+            && total_length > 0
+            && transferred >= total_length
+        {
             "Installing"
+        } else if raw_status == "Unknown" && total_length > 0 && transferred < total_length {
+            "Downloading"
         } else {
             raw_status
         };
@@ -786,12 +803,14 @@ fn task_status(bits: Option<&Value>) -> &'static str {
         .or_else(|| text.strip_prefix("0X"))
         .and_then(|hex| u64::from_str_radix(hex, 16).ok())
         .or_else(|| text.parse::<u64>().ok());
-    match numeric {
-        Some(0x18a) => "Downloading",
-        Some(0x18e) => "Installing",
-        Some(0x193) => "Installed",
-        Some(0x1a8) => "Paused",
-        Some(0x188) => "Stopped",
+    // Mask to the low byte because libSceBgft can leave non-zero flags/bytes
+    // in the upper bits of SceBgftTaskProgress.bits (e.g. 0x3633358a / 0x36333593).
+    match numeric.map(|v| v & 0xff) {
+        Some(0x8a) => "Downloading",
+        Some(0x8e) => "Installing",
+        Some(0x93) => "Installed",
+        Some(0xa8) => "Paused",
+        Some(0x88) => "Stopped",
         _ => "Unknown",
     }
 }
